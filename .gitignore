@@ -1,0 +1,16 @@
+# Python ignore patterns
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+
+# Streamlit config
+.streamlit/
+
+# Large output files (optional)
+output/*.mp4
+output/*.png
