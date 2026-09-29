@@ -1,7 +1,7 @@
 """
 Vision-Based Object Detection & Tracking Using YOLO
 Main Streamlit Application Dashboard with Multi-Tab Modular Architecture.
-Supports Browser-Side WebRTC Webcam Streaming for Streamlit Community Cloud Deployment.
+Configured for Streamlit Community Cloud with STUN WebRTC Browser Webcam Streaming.
 """
 
 import os
@@ -51,20 +51,34 @@ st.set_page_config(
 # Inject custom CSS styles
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-# Google Public STUN Servers for WebRTC NAT Traversal on Streamlit Cloud
-RTC_CONFIGURATION = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]}
+# Google Public STUN Servers for WebRTC NAT Traversal on Streamlit Community Cloud
+rtc_configuration = RTCConfiguration(
+    {
+        "iceServers": [
+            {
+                "urls": [
+                    "stun:stun.l.google.com:19302",
+                    "stun:stun1.l.google.com:19302",
+                    "stun:stun2.l.google.com:19302",
+                    "stun:stun3.l.google.com:19302",
+                    "stun:stun4.l.google.com:19302"
+                ]
+            }
+        ]
+    }
 )
 
 
 class YOLOVideoProcessor(VideoProcessorBase):
     """
-    WebRTC Video Processor class for handling browser-side webcam streams.
+    WebRTC Video Processor class for handling browser-side webcam streams on Streamlit Cloud.
     Executes YOLO detection & ByteTrack tracking on incoming video frames.
     """
 
     def __init__(self):
         self.tracker = None
+        self.model_name = "yolov8n.pt"
+        self.tracker_type = "bytetrack"
         self.conf_thresh = 0.25
         self.iou_thresh = 0.45
         self.selected_classes = None
@@ -74,15 +88,20 @@ class YOLOVideoProcessor(VideoProcessorBase):
         self.show_id = True
         self.show_hud = True
         self.fps_calc = FPSCalculator()
+        self.latest_stats = {'active_objects': 0, 'total_unique_tracked': 0, 'class_distribution': {}}
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         """Process incoming browser video frame through YOLO + ByteTrack pipeline."""
-        img = frame.to_ndarray(format="bgr24")
+        try:
+            img = frame.to_ndarray(format="bgr24")
 
-        if self.tracker is not None:
+            # Auto-initialize tracker if not set by main thread yet
+            if self.tracker is None:
+                self.tracker = YOLOTracker(model_name=self.model_name, tracker_type=self.tracker_type)
+
             fps_val = self.fps_calc.update()
 
-            # Execute multi-object tracking
+            # Execute multi-object tracking using YOLO + ByteTrack
             tracked_objects = self.tracker.track(
                 frame=img,
                 conf_thresh=self.conf_thresh,
@@ -90,21 +109,26 @@ class YOLOVideoProcessor(VideoProcessorBase):
                 target_classes=self.selected_classes
             )
 
-            # Draw annotations
+            # Store latest telemetry stats for dashboard sync
+            self.latest_stats = self.tracker.get_stats()
+
+            # Draw bounding boxes, class labels, confidence %, tracking IDs, and HUD badge
             annotated_img = draw_annotations(
                 frame=img,
                 objects=tracked_objects,
                 show_boxes=self.show_boxes,
-                show_labels=show_labels,
-                show_conf=show_conf,
-                show_id=show_id,
-                show_stats_overlay=show_hud,
+                show_labels=self.show_labels,
+                show_conf=self.show_conf,
+                show_id=self.show_id,
+                show_stats_overlay=self.show_hud,
                 fps=fps_val
             )
 
             return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
 
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+        except Exception as e:
+            print(f"[WebRTC VideoProcessor Error]: {str(e)}")
+            return frame
 
 
 @st.cache_resource
@@ -156,7 +180,7 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🤖 Model & Tracker Settings")
     
-    # Model Selection
+    # Model Selection (Default to YOLOv8 Nano)
     available_model_files = get_available_models()
     selected_model_file = st.sidebar.selectbox(
         "YOLO Model Architecture:",
@@ -165,7 +189,7 @@ def main():
         index=0
     )
     
-    # Tracker Selection
+    # Tracker Selection (Default to ByteTrack)
     tracker_type = st.sidebar.selectbox(
         "Object Tracker Algorithm:",
         ["ByteTrack", "BoT-SORT"],
@@ -419,23 +443,25 @@ def main():
             else:
                 video_placeholder.info("👈 Please upload a video file to proceed.")
 
-        # --- OPTION C: WEBCAM (BROWSER-SIDE WEBRTC FOR STREAMLIT CLOUD) ---
+        # --- OPTION C: WEBCAM (BROWSER WEBRTC STUN STREAMER FOR STREAMLIT CLOUD) ---
         elif input_source == "📹 Webcam (Browser)":
-            st.info("🌐 **Browser Webcam Stream**: Click 'START' below to grant camera access and begin live YOLOv8 + ByteTrack tracking.")
+            st.info("🌐 **Browser Webcam Stream**: Click 'START' below to grant camera permission and open WebRTC live stream.")
 
-            # WebRTC Streamer component
+            # WebRTC Streamer component using rtc_configuration STUN settings
             webrtc_ctx = webrtc_streamer(
                 key="yolo-webcam-cloud",
                 mode=WebRtcMode.SENDRECV,
-                rtc_configuration=RTC_CONFIGURATION,
+                rtc_configuration=rtc_configuration,
                 video_processor_factory=YOLOVideoProcessor,
                 media_stream_constraints={"video": True, "audio": False},
                 async_processing=True,
             )
 
-            # Pass parameters to active WebRTC video processor
+            # Dynamically sync parameters and tracker to active WebRTC video processor
             if webrtc_ctx.video_processor:
                 webrtc_ctx.video_processor.tracker = tracker
+                webrtc_ctx.video_processor.model_name = selected_model_file
+                webrtc_ctx.video_processor.tracker_type = tracker_type.lower()
                 webrtc_ctx.video_processor.conf_thresh = conf_thresh
                 webrtc_ctx.video_processor.iou_thresh = iou_thresh
                 webrtc_ctx.video_processor.selected_classes = selected_classes if len(selected_classes) > 0 else None
@@ -445,13 +471,23 @@ def main():
                 webrtc_ctx.video_processor.show_id = show_id
                 webrtc_ctx.video_processor.show_hud = show_hud
 
-            # Display real-time stats breakdown from tracker
-            stats = tracker.get_stats()
-            render_cards(0.0, stats['active_objects'], stats['total_unique_tracked'])
-            class_dist = stats['class_distribution']
-            if class_dist:
-                df_dist = pd.DataFrame(list(class_dist.items()), columns=["Class", "Count"])
-                breakdown_placeholder.dataframe(df_dist, hide_index=True, use_container_width=True)
+                # Fetch real-time stats directly from WebRTC video processor
+                proc_stats = webrtc_ctx.video_processor.latest_stats
+                fps_val = webrtc_ctx.video_processor.fps_calc.get_fps()
+                
+                # Log telemetry to analytics engine
+                if fps_val > 0:
+                    analytics_engine.log_frame(fps_val, proc_stats['active_objects'])
+
+                render_cards(fps_val, proc_stats['active_objects'], proc_stats['total_unique_tracked'])
+                
+                class_dist = proc_stats['class_distribution']
+                if class_dist:
+                    df_dist = pd.DataFrame(list(class_dist.items()), columns=["Class", "Count"])
+                    breakdown_placeholder.dataframe(df_dist, hide_index=True, use_container_width=True)
+            else:
+                stats = tracker.get_stats()
+                render_cards(0.0, stats['active_objects'], stats['total_unique_tracked'])
 
     # =========================================================
     # TAB 2: REAL-TIME ANALYTICS
